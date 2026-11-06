@@ -8,13 +8,13 @@
 # Cluster:
 #   3 DB nodes (i8g.large), 1 loader, 1 monitor
 # Stress:
-#   10 min of writes to populate, then 20 min mixed 50/50
+#   populate 20M rows of 1 KB (each key written once, ~60 GB with RF 3), then 20 min mixed 50/50
 
 test_duration: 120
 test_metadata:
   description: >-
     Smoke test for the compaction controller comparison: a BYO ScyllaDB build on a
-    3-node cluster of small instances with an ICS table, 10 minutes of writes then
+    3-node cluster of small instances with an ICS table, a 20M-row population (each key written once) then
     20 minutes of mixed cassandra-stress load, no nemesis. Validates the job plumbing
     (BYO build, controller selection via scylla.yaml) before the long workloads run.
   test_type: longevity
@@ -45,7 +45,7 @@ append_scylla_yaml:
   compaction_controller: v2
 
 prepare_write_cmd: >-
-  cassandra-stress write no-warmup cl=QUORUM duration=10m
+  cassandra-stress write no-warmup cl=QUORUM n=20000000
   -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
   -rate threads=50
