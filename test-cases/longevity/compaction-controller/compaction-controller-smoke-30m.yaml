@@ -1,0 +1,65 @@
+# Smoke run for the compaction controller comparison jobs.
+#
+# Proves the plumbing before the real workloads: a BYO ScyllaDB build from a
+# fork, a 3-node cluster of the smallest instances, an ICS table (the only
+# strategy compaction_controller v2 models), and the scylla.yaml switch that
+# picks the controller. Short stress, no nemesis.
+#
+# Cluster:
+#   3 DB nodes (i8g.large), 1 loader, 1 monitor
+# Stress:
+#   10 min of writes to populate, then 20 min mixed 50/50
+
+test_duration: 120
+test_metadata:
+  description: >-
+    Smoke test for the compaction controller comparison: a BYO ScyllaDB build on a
+    3-node cluster of small instances with an ICS table, 10 minutes of writes then
+    20 minutes of mixed cassandra-stress load, no nemesis. Validates the job plumbing
+    (BYO build, controller selection via scylla.yaml) before the long workloads run.
+  test_type: longevity
+  tier: ondemand
+  duration_class: short
+  supported_backends:
+    - aws
+  stress_tools:
+    - cassandra-stress
+  workload: mixed
+
+n_db_nodes: 3
+n_loaders: 1
+n_monitor_nodes: 1
+
+instance_type_db: 'i8g.large'
+instance_type_loader: 'c6i.large'
+
+user_prefix: 'compaction-controller-smoke'
+
+# No chaos: the comparison wants steady load only.
+nemesis_class_name: 'NoOpMonkey'
+
+# The controller under test. v1 is the backlog controller, v2 the rate-matching one.
+# Switching needs a fresh cluster, so each job pins one value.
+append_scylla_yaml:
+  rf_rack_valid_keyspaces: true
+  compaction_controller: v2
+
+prepare_write_cmd: >-
+  cassandra-stress write no-warmup cl=QUORUM duration=10m
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=50
+  -pop seq=1..20000000
+  -col 'n=FIXED(4) size=FIXED(256)'
+  -log interval=5
+
+stress_cmd: >-
+  cassandra-stress mixed no-warmup cl=QUORUM duration=20m 'ratio(write=1,read=1)'
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=50
+  -pop seq=1..20000000
+  -col 'n=FIXED(4) size=FIXED(256)'
+  -log interval=5
+
+round_robin: true
