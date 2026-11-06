@@ -1,0 +1,66 @@
+# Compaction controller comparison: trickle-write workload, controller v2.
+#
+# One of six jobs (3 workloads x 2 controllers) comparing the backlog-based
+# controller (v1) with the rate-matching controller (v2). Scylla comes from a
+# BYO build of raphaelsc/scylla branch experiment/closed-loop-demo (or the AMI
+# baked from it); the controller is selected through scylla.yaml.
+#
+# Cluster: 3 DB nodes (i8g.large), 1 loader, 1 monitor, no nemesis.
+# Stress:
+#   prepare: 50M rows of 1 KB written once (~0 GB with RF 3, ~23 min at the
+#            ~36K ops/s one c6i.large loader with 50 threads delivers to this cluster)
+#   stress:  4 h of cassandra-stress mixed, 5% writes / 95% reads, throttled to 20K ops/s,
+#            uniform key distribution over the populated range so reads miss cache.
+# Only ICS tables feed rates to controller v2, so the schema is ICS.
+
+test_duration: 320
+test_metadata:
+  description: >-
+    Compaction controller comparison, trickle-write workload (5% writes / 95% reads) with
+    controller v2 selected via scylla.yaml. BYO ScyllaDB build on a 3-node cluster of
+    small instances, ICS table, 50M-row population then 4 hours of throttled
+    cassandra-stress mixed load with a uniform key distribution. No nemesis.
+  test_type: longevity
+  tier: ondemand
+  duration_class: short
+  supported_backends:
+    - aws
+  stress_tools:
+    - cassandra-stress
+  workload: read
+
+n_db_nodes: 3
+n_loaders: 1
+n_monitor_nodes: 1
+
+instance_type_db: 'i8g.large'
+instance_type_loader: 'c6i.large'
+
+user_prefix: 'cc-trickle-v2'
+
+nemesis_class_name: 'NoOpMonkey'
+
+# Setting append_scylla_yaml replaces the default dict, so keep rf_rack_valid_keyspaces.
+append_scylla_yaml:
+  rf_rack_valid_keyspaces: true
+  compaction_controller: v2
+
+prepare_write_cmd: >-
+  cassandra-stress write no-warmup cl=QUORUM n=50000000
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=50
+  -pop seq=1..50000000
+  -col 'n=FIXED(4) size=FIXED(256)'
+  -log interval=5
+
+stress_cmd: >-
+  cassandra-stress mixed no-warmup cl=QUORUM duration=240m 'ratio(write=1,read=19)'
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=50 throttle=20000/s
+  -pop 'dist=UNIFORM(1..50000000)'
+  -col 'n=FIXED(4) size=FIXED(256)'
+  -log interval=5
+
+round_robin: true
