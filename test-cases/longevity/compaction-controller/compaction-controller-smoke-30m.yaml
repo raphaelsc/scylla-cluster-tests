@@ -44,6 +44,14 @@ append_scylla_yaml:
   rf_rack_valid_keyspaces: true
   compaction_controller: v2
 
+# Scylla command line: the SCT defaults (setting append_scylla_args replaces them)
+# plus debug logging of the compaction rate/controller logger, so the per-minute
+# controller decisions are in the DB logs next to the metrics.
+append_scylla_args: >-
+  --blocked-reactor-notify-ms 25 --abort-on-lsa-bad-alloc 1 --abort-on-seastar-bad-alloc
+  --abort-on-internal-error 1 --abort-on-ebadf 1 --enable-sstable-key-validation 1
+  --logger-log-level compaction_rates=debug
+
 prepare_write_cmd: >-
   cassandra-stress write no-warmup cl=QUORUM n=20000000
   -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
