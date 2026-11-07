@@ -1,15 +1,17 @@
-# Compaction controller comparison: trickle-write workload, controller v1.
+# Compaction controller comparison: moderate-write workload, controller v2.
 #
 # One of six jobs (3 workloads x 2 controllers) comparing the backlog-based
 # controller (v1) with the rate-matching controller (v2). Scylla comes from a
 # BYO build of raphaelsc/scylla branch experiment/closed-loop-demo (or the AMI
 # baked from it); the controller is selected through scylla.yaml.
 #
-# Cluster: 3 DB nodes (i8g.large), 1 loader, 1 monitor, no nemesis.
+# Cluster: 1 DB node (i8g.large), RF 1, 1 loader, 1 monitor, no nemesis.
+# A single node is enough: the controller is per shard, and 12 hours of steady
+# load is there to show the integrator does not wind up over time.
 # Stress:
-#   prepare: 50M rows of 1 KB written once (~150 GB with RF 3, ~23 min at the
-#            ~36K ops/s a c6i.large loader with 50 threads delivered to this cluster)
-#   stress:  4 h of cassandra-stress mixed, 5% writes / 95% reads, NOT throttled, 200 threads
+#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~23 min at
+#            the ~36K rows/s per node seen in the smoke runs)
+#   stress:  12 h of cassandra-stress mixed, 40% writes / 60% reads, NOT throttled, 200 threads
 #            from a c6i.xlarge loader, uniform key distribution over the populated
 #            range so reads miss cache.
 #
@@ -20,42 +22,42 @@
 # loader before trusting the results.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
-test_duration: 320
+test_duration: 780
 test_metadata:
   description: >-
-    Compaction controller comparison, trickle-write workload (5% writes / 95% reads) with
-    controller v1 selected via scylla.yaml. BYO ScyllaDB build on a 3-node cluster of
-    small instances, ICS table, 50M-row population then 4 hours of unthrottled
+    Compaction controller comparison, moderate-write workload (40% writes / 60% reads) with
+    controller v2 selected via scylla.yaml. BYO ScyllaDB build on a single small
+    node, RF 1, ICS table, 50M-row population then 12 hours of unthrottled
     cassandra-stress mixed load with a uniform key distribution that keeps the DB CPUs saturated,
     so compaction only gets the CPU its shares allow. No nemesis.
   test_type: longevity
   tier: ondemand
-  duration_class: short
+  duration_class: medium
   supported_backends:
     - aws
   stress_tools:
     - cassandra-stress
-  workload: read
+  workload: mixed
 
-n_db_nodes: 3
+n_db_nodes: 1
 n_loaders: 1
 n_monitor_nodes: 1
 
 instance_type_db: 'i8g.large'
 instance_type_loader: 'c6i.xlarge'
 
-user_prefix: 'cc-trickle-v1'
+user_prefix: 'cc-moderate-v2'
 
 nemesis_class_name: 'NoOpMonkey'
 
 # Setting append_scylla_yaml replaces the default dict, so keep rf_rack_valid_keyspaces.
 append_scylla_yaml:
   rf_rack_valid_keyspaces: true
-  compaction_controller: v1
+  compaction_controller: v2
 
 prepare_write_cmd: >-
-  cassandra-stress write no-warmup cl=QUORUM n=50000000
-  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
+  cassandra-stress write no-warmup cl=ONE n=50000000
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
   -rate threads=50
   -pop seq=1..50000000
@@ -63,8 +65,8 @@ prepare_write_cmd: >-
   -log interval=5
 
 stress_cmd: >-
-  cassandra-stress mixed no-warmup cl=QUORUM duration=240m 'ratio(write=1,read=19)'
-  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3) compaction(strategy=IncrementalCompactionStrategy)'
+  cassandra-stress mixed no-warmup cl=ONE duration=720m 'ratio(write=2,read=3)'
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
   -rate threads=200
   -pop 'dist=UNIFORM(1..50000000)'
