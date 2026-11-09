@@ -44,7 +44,7 @@ test_metadata:
     stream, so compaction only gets the capacity its shares allow. No nemesis.
   test_type: longevity
   tier: ondemand
-  duration_class: short
+  duration_class: medium
   supported_backends:
     - aws
   stress_tools:
