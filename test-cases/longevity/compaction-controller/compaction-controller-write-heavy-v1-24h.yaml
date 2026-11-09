@@ -1,0 +1,105 @@
+# Compaction controller comparison: write-heavy workload, controller v1.
+#
+# One of six jobs (3 workloads x 2 controllers) comparing the backlog-based
+# controller (v1) with the rate-matching controller (v2). Scylla comes from a
+# BYO build of raphaelsc/scylla branch v2-work-over-deadline (or the AMI
+# baked from it); the controller is selected through scylla.yaml.
+#
+# Cluster: 1 DB node (i8g.large), RF 1, 1 loader, 1 monitor, no nemesis.
+# A single node is enough: the controller is per shard. This is the 24 h variant
+# of the 12 h job: the 2026-11-09 round showed the v2 busy shard still accumulating
+# runs in pending tiers at hour 12 (9 -> 20 runs, normalized backlog 2 -> 21) with
+# target == achieved, so 12 h was not long enough to see where that surplus goes,
+# nor whether v1's integrator winds up. Same load as the 12 h job, only longer.
+# Stress:
+#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~19 min at the
+#            ~45K rows/s per node measured in the 12 h runs)
+#   stress:  24 h of cassandra-stress mixed, 95% writes / 5% reads, NOT throttled, 200 threads
+#            from a c6i.xlarge loader, uniform key distribution over the populated
+#            range so reads miss cache.
+#
+# The query load must leave no spare capacity. Seastar's schedulers are work
+# conserving: idle CPU or disk goes to compaction whatever shares the controller
+# set, and then v1 and v2 are indistinguishable. 200 threads keep the reactors at
+# 94-100% here, and the node is disk-bound as well: on i4i.large both controllers
+# ran near maximum shares, sustained ~30K writes/s against the NVMe's 280 MB/s of
+# writes, read p99 was 250-350 ms, and disk usage peaked near 325 GB. The two
+# controllers still differed on it (v2 traded write latency for read latency in
+# the 2026-11-09 round), so the load stays unthrottled. Check the device size on
+# the instance in use before lengthening the run.
+# Disk over 24 h: the live set stays 50 GB (overwrites), and in the 12 h runs the disk
+# usage oscillated between 236 and 324 GB on the 468 GB NVMe as ICS released space; it
+# did not grow with time, so 24 h should stay in that band. Watch scylla_filesystem
+# usage in the first 12 h anyway and stop the run if it exceeds 380 GB.
+# Only ICS tables feed rates to controller v2, so the schema is ICS.
+
+test_duration: 1500
+test_metadata:
+  description: >-
+    Compaction controller comparison, write-heavy workload (95% writes / 5% reads) with
+    controller v1 selected via scylla.yaml. BYO ScyllaDB build on a single small
+    node, RF 1, ICS table, 50M-row population then 24 hours of unthrottled
+    cassandra-stress mixed load with a uniform key distribution that keeps the DB CPUs saturated,
+    so compaction only gets the CPU its shares allow. No nemesis.
+  test_type: longevity
+  tier: ondemand
+  duration_class: long
+  supported_backends:
+    - aws
+  stress_tools:
+    - cassandra-stress
+  workload: write
+
+n_db_nodes: 1
+n_loaders: 1
+n_monitor_nodes: 1
+
+instance_type_db: 'i8g.large'
+instance_type_loader: 'c6i.xlarge'
+
+user_prefix: 'cc-write-heavy-v1-24h'
+
+nemesis_class_name: 'NoOpMonkey'
+
+# Setting append_scylla_yaml replaces the default dict, so keep rf_rack_valid_keyspaces.
+append_scylla_yaml:
+  rf_rack_valid_keyspaces: true
+  compaction_controller: v1
+
+# Scylla command line: the SCT defaults (setting append_scylla_args replaces them)
+# plus debug logging of the compaction rate/controller logger, so the per-minute
+# controller decisions are in the DB logs next to the metrics.
+append_scylla_args: >-
+  --blocked-reactor-notify-ms 25 --abort-on-lsa-bad-alloc 1 --abort-on-seastar-bad-alloc
+  --abort-on-internal-error 1 --abort-on-ebadf 1 --enable-sstable-key-validation 1
+  --logger-log-level compaction_rates=debug
+
+# One tablet replica per shard. i8g.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
+# 2 tablet replicas of ~25 GB each, one per shard.
+# min/max_tablet_count pin the count, so the table growing past the 5 GB default
+# tablet size never triggers a split, which would double the compaction groups
+# the controller sees. cassandra-stress uses CREATE ... IF NOT EXISTS, so this
+# pre-created schema wins over the one in its -schema option.
+pre_create_keyspace:
+  - "CREATE KEYSPACE IF NOT EXISTS keyspace1 WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 2};"
+  - "CREATE TABLE IF NOT EXISTS keyspace1.standard1 (key blob PRIMARY KEY, \"C0\" blob, \"C1\" blob, \"C2\" blob, \"C3\" blob) WITH compaction = {'class': 'IncrementalCompactionStrategy'} AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};"
+
+prepare_write_cmd: >-
+  cassandra-stress write no-warmup cl=ONE n=50000000
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=50
+  -pop seq=1..50000000
+  -col 'n=FIXED(4) size=FIXED(256)'
+  -log interval=5
+
+stress_cmd: >-
+  cassandra-stress mixed no-warmup cl=ONE duration=1440m 'ratio(write=19,read=1)'
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=200
+  -pop 'dist=UNIFORM(1..50000000)'
+  -col 'n=FIXED(4) size=FIXED(256)'
+  -log interval=5
+
+round_robin: true
