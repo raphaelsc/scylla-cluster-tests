@@ -9,17 +9,21 @@
 # A single node is enough: the controller is per shard, and 12 hours of steady
 # load is there to show the integrator does not wind up over time.
 # Stress:
-#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~23 min at
-#            the ~36K rows/s per node seen in the smoke runs)
+#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~19 min at the
+#            ~45K rows/s per node measured in the 12 h runs)
 #   stress:  12 h of cassandra-stress mixed, 95% writes / 5% reads, NOT throttled, 200 threads
 #            from a c6i.xlarge loader, uniform key distribution over the populated
 #            range so reads miss cache.
 #
-# The query load must leave no spare CPU. Seastar's scheduler is work conserving:
-# idle CPU goes to compaction whatever shares the controller set, and then v1 and
-# v2 would be indistinguishable. Check scylla_reactor_utilization is ~100% on every
-# shard in the first minutes of the stress phase; if not, raise threads or add a
-# loader before trusting the results.
+# The query load must leave no spare capacity. Seastar's schedulers are work
+# conserving: idle CPU or disk goes to compaction whatever shares the controller
+# set, and then v1 and v2 are indistinguishable. 200 threads keep the reactors at
+# 94-100% here, and the node is disk-bound as well: on i4i.large both controllers
+# ran near maximum shares, sustained ~30K writes/s against the NVMe's 280 MB/s of
+# writes, read p99 was 250-350 ms, and disk usage peaked near 325 GB. The two
+# controllers still differed on it (v2 traded write latency for read latency in
+# the 2026-11-09 round), so the load stays unthrottled. Check the device size on
+# the instance in use before lengthening the run.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
 test_duration: 780
