@@ -2,10 +2,10 @@
 #
 # One of six jobs (3 workloads x 2 controllers) comparing the backlog-based
 # controller (v1) with the rate-matching controller (v2). Scylla comes from a
-# BYO build of raphaelsc/scylla branch experiment/closed-loop-demo (or the AMI
+# BYO build of raphaelsc/scylla branch v2-work-over-deadline (or the AMI
 # baked from it); the controller is selected through scylla.yaml.
 #
-# Cluster: 1 DB node (i4i.large), RF 1, 1 loader, 1 monitor, no nemesis.
+# Cluster: 1 DB node (i8g.large), RF 1, 1 loader, 1 monitor, no nemesis.
 # A single node is enough: the controller is per shard, and 12 hours of steady
 # load is there to show the integrator does not wind up over time.
 # Stress:
@@ -43,7 +43,7 @@ n_db_nodes: 1
 n_loaders: 1
 n_monitor_nodes: 1
 
-instance_type_db: 'i4i.large'
+instance_type_db: 'i8g.large'
 instance_type_loader: 'c6i.xlarge'
 
 user_prefix: 'cc-trickle-v2'
@@ -63,7 +63,7 @@ append_scylla_args: >-
   --abort-on-internal-error 1 --abort-on-ebadf 1 --enable-sstable-key-validation 1
   --logger-log-level compaction_rates=debug
 
-# One tablet replica per shard. i4i.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
+# One tablet replica per shard. i8g.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
 # 2 tablet replicas of ~25 GB each, one per shard.
 # min/max_tablet_count pin the count, so the table growing past the 5 GB default
 # tablet size never triggers a split, which would double the compaction groups
