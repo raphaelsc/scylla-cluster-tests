@@ -9,27 +9,38 @@
 # A single node is enough: the controller is per shard, and 12 hours of steady
 # load is there to show the integrator does not wind up over time.
 # Stress:
-#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~23 min at
-#            the ~36K rows/s per node seen in the smoke runs)
-#   stress:  12 h of cassandra-stress mixed, 5% writes / 95% reads, NOT throttled, 200 threads
-#            from a c6i.xlarge loader, uniform key distribution over the populated
-#            range so reads miss cache.
+#   prepare: 150M rows of 1 KB written once (~150 GB, 9x the node's RAM; ~55 min at the
+#            ~45K rows/s per node measured in the 12 h runs). The size matters: v1's
+#            share curve has its knee at a normalized backlog of 1.5 (backlog over shard
+#            memory) and with 50 GB the top-tier merges never reached it, so v1 never
+#            burst and the two controllers could not be told apart (rounds of 2026-11-08
+#            and 2026-11-09).
+#   stress:  12 h of two concurrent cassandra-stress commands:
+#            - write: new keys only (a sequence above the populated range), throttled
+#              to 1000/s, ~1 MB/s, which is what the 5%/95% mixed command delivered.
+#              No overwrites: in the 12 h runs the overwritten keys spread over the
+#              sstables and the read rate drifted from 25K/s to 17K/s under both
+#              controllers, hiding the controller's effect on the reads.
+#            - read: unthrottled, 400 threads, uniform over the populated range so
+#              reads miss cache. About 4% writes / 96% reads by count.
 #
-# The query load must leave no spare CPU. Seastar's scheduler is work conserving:
-# idle CPU goes to compaction whatever shares the controller set, and then v1 and
-# v2 would be indistinguishable. Check scylla_reactor_utilization is ~100% on every
-# shard in the first minutes of the stress phase; if not, raise threads or add a
-# loader before trusting the results.
+# The query load must leave no spare capacity. Seastar's schedulers are work
+# conserving: idle CPU or disk goes to compaction whatever shares the controller
+# set, and then v1 and v2 are indistinguishable. In the first hour of the stress
+# phase check, on both shards, that scylla_reactor_utilization is ~100% or the I/O
+# queue is saturated (compaction-class scylla_io_queue_delay climbing); if neither,
+# raise the read threads before trusting the results. 200 threads left the reactors
+# at 90% in the 12 h runs, hence 400.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
-test_duration: 780
+test_duration: 840
 test_metadata:
   description: >-
-    Compaction controller comparison, trickle-write workload (5% writes / 95% reads) with
-    controller v2 selected via scylla.yaml. BYO ScyllaDB build on a single small
-    node, RF 1, ICS table, 50M-row population then 12 hours of unthrottled
-    cassandra-stress mixed load with a uniform key distribution that keeps the DB CPUs saturated,
-    so compaction only gets the CPU its shares allow. No nemesis.
+    Compaction controller comparison, trickle-write workload (~1000 new-key writes/s
+    against unthrottled reads, ~4% / 96%) with controller v2 selected via scylla.yaml.
+    BYO ScyllaDB build on a single small node, RF 1, ICS table, 150M-row population
+    then 12 hours of a throttled new-key write stream plus a saturating uniform read
+    stream, so compaction only gets the capacity its shares allow. No nemesis.
   test_type: longevity
   tier: ondemand
   duration_class: medium
@@ -64,7 +75,7 @@ append_scylla_args: >-
   --logger-log-level compaction_rates=debug
 
 # One tablet replica per shard. i8g.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
-# 2 tablet replicas of ~25 GB each, one per shard.
+# 2 tablet replicas of ~75 GB each, one per shard.
 # min/max_tablet_count pin the count, so the table growing past the 5 GB default
 # tablet size never triggers a split, which would double the compaction groups
 # the controller sees. cassandra-stress uses CREATE ... IF NOT EXISTS, so this
@@ -74,21 +85,30 @@ pre_create_keyspace:
   - "CREATE TABLE IF NOT EXISTS keyspace1.standard1 (key blob PRIMARY KEY, \"C0\" blob, \"C1\" blob, \"C2\" blob, \"C3\" blob) WITH compaction = {'class': 'IncrementalCompactionStrategy'} AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};"
 
 prepare_write_cmd: >-
-  cassandra-stress write no-warmup cl=ONE n=50000000
+  cassandra-stress write no-warmup cl=ONE n=150000000
   -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
   -rate threads=50
-  -pop seq=1..50000000
+  -pop seq=1..150000000
   -col 'n=FIXED(4) size=FIXED(256)'
   -log interval=5
 
-stress_cmd: >-
-  cassandra-stress mixed no-warmup cl=ONE duration=720m 'ratio(write=1,read=19)'
-  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
-  -mode cql3 native
-  -rate threads=200
-  -pop 'dist=UNIFORM(1..50000000)'
-  -col 'n=FIXED(4) size=FIXED(256)'
-  -log interval=5
+stress_cmd:
+  - >-
+    cassandra-stress write no-warmup cl=ONE duration=720m
+    -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
+    -mode cql3 native
+    -rate threads=10 throttle=1000/s
+    -pop seq=150000001..200000000
+    -col 'n=FIXED(4) size=FIXED(256)'
+    -log interval=5
+  - >-
+    cassandra-stress read no-warmup cl=ONE duration=720m
+    -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
+    -mode cql3 native
+    -rate threads=400
+    -pop 'dist=UNIFORM(1..150000000)'
+    -col 'n=FIXED(4) size=FIXED(256)'
+    -log interval=5
 
 round_robin: true
