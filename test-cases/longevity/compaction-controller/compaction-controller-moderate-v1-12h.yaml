@@ -9,17 +9,25 @@
 # A single node is enough: the controller is per shard, and 12 hours of steady
 # load is there to show the integrator does not wind up over time.
 # Stress:
-#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~23 min at
-#            the ~36K rows/s per node seen in the smoke runs)
-#   stress:  12 h of cassandra-stress mixed, 40% writes / 60% reads, NOT throttled, 200 threads
-#            from a c6i.xlarge loader, uniform key distribution over the populated
-#            range so reads miss cache.
+#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~19 min at the
+#            ~45K rows/s per node measured in the 12 h runs)
+#   stress:  12 h of cassandra-stress mixed, 40% writes / 60% reads, NOT throttled,
+#            400 threads from a c6i.xlarge loader, uniform key distribution over the
+#            populated range so reads miss cache. 200 threads left the reactors at
+#            74-88% in the 12 h runs: the reads wait on the disk, and the I/O queue,
+#            not the CPU, was the contended resource.
 #
-# The query load must leave no spare CPU. Seastar's scheduler is work conserving:
-# idle CPU goes to compaction whatever shares the controller set, and then v1 and
-# v2 would be indistinguishable. Check scylla_reactor_utilization is ~100% on every
-# shard in the first minutes of the stress phase; if not, raise threads or add a
-# loader before trusting the results.
+# The query load must leave no spare capacity. Seastar's schedulers are work
+# conserving: idle CPU or disk goes to compaction whatever shares the controller
+# set, and then v1 and v2 are indistinguishable. In the first hour of the stress
+# phase check, on both shards, that scylla_reactor_utilization is ~100% or the I/O
+# queue is saturated (compaction-class scylla_io_queue_delay climbing); if neither,
+# raise the threads before trusting the results.
+# Throughput drifts for the first 3-4 hours (reads 15K/s to 8K/s) while the
+# overwrite workload settles and the tree deepens; compare runs from hour 4 on.
+# v1 shows its bursts here at the default normalization factor (35 excursions above
+# 200 shares in 12 h, read p99 80-123 ms inside them against 53 ms), so the factor
+# is left at its default.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
 test_duration: 780
@@ -28,8 +36,8 @@ test_metadata:
     Compaction controller comparison, moderate-write workload (40% writes / 60% reads) with
     controller v1 selected via scylla.yaml. BYO ScyllaDB build on a single small
     node, RF 1, ICS table, 50M-row population then 12 hours of unthrottled
-    cassandra-stress mixed load with a uniform key distribution that keeps the DB CPUs saturated,
-    so compaction only gets the CPU its shares allow. No nemesis.
+    cassandra-stress mixed load (400 threads) with a uniform key distribution that saturates
+    the node, so compaction only gets the capacity its shares allow. No nemesis.
   test_type: longevity
   tier: ondemand
   duration_class: medium
@@ -86,7 +94,7 @@ stress_cmd: >-
   cassandra-stress mixed no-warmup cl=ONE duration=720m 'ratio(write=2,read=3)'
   -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
-  -rate threads=200
+  -rate threads=400
   -pop 'dist=UNIFORM(1..50000000)'
   -col 'n=FIXED(4) size=FIXED(256)'
   -log interval=5
