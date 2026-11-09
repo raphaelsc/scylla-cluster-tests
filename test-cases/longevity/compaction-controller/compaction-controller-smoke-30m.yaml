@@ -6,7 +6,7 @@
 # picks the controller. Short stress, no nemesis.
 #
 # Cluster:
-#   3 DB nodes (i4i.large), 1 loader, 1 monitor
+#   3 DB nodes (i8g.large), 1 loader, 1 monitor
 # Stress:
 #   populate 20M rows of 1 KB (each key written once, ~60 GB with RF 3), then 20 min mixed 50/50
 
@@ -30,7 +30,7 @@ n_db_nodes: 3
 n_loaders: 1
 n_monitor_nodes: 1
 
-instance_type_db: 'i4i.large'
+instance_type_db: 'i8g.large'
 instance_type_loader: 'c6i.large'
 
 user_prefix: 'compaction-controller-smoke'
@@ -52,7 +52,7 @@ append_scylla_args: >-
   --abort-on-internal-error 1 --abort-on-ebadf 1 --enable-sstable-key-validation 1
   --logger-log-level compaction_rates=debug
 
-# One tablet replica per shard. 3 nodes x 2 shards (i4i.large) and RF 3: 2 tablets x 3 replicas = 6, one per shard.
+# One tablet replica per shard. 3 nodes x 2 shards (i8g.large) and RF 3: 2 tablets x 3 replicas = 6, one per shard.
 # min/max_tablet_count pin the count, so the table growing past the 5 GB default
 # tablet size never triggers a split, which would double the compaction groups
 # the controller sees. cassandra-stress uses CREATE ... IF NOT EXISTS, so this
