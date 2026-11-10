@@ -9,7 +9,7 @@
 # A single node is enough: the controller is per shard, and 12 hours of steady
 # load is there to show the integrator does not wind up over time.
 # Stress:
-#   prepare: 50M rows of 1 KB written once (~50 GB, 3x the node's RAM; ~19 min at the
+#   prepare: 25M rows of 1 KB written once (~25 GB, 1.5x the node's RAM; ~10 min at the
 #            ~45K rows/s per node measured in the 12 h runs)
 #   stress:  12 h of cassandra-stress mixed, 95% writes / 5% reads, NOT throttled, 200 threads
 #            from a c6i.xlarge loader, uniform key distribution over the populated
@@ -18,12 +18,20 @@
 # The query load must leave no spare capacity. Seastar's schedulers are work
 # conserving: idle CPU or disk goes to compaction whatever shares the controller
 # set, and then v1 and v2 are indistinguishable. 200 threads keep the reactors at
-# 94-100% here, and the node is disk-bound as well: on i4i.large both controllers
-# ran near maximum shares, sustained ~30K writes/s against the NVMe's 280 MB/s of
-# writes, read p99 was 250-350 ms, and disk usage peaked near 325 GB. The two
-# controllers still differed on it (v2 traded write latency for read latency in
-# the 2026-11-09 round), so the load stays unthrottled. Check the device size on
-# the instance in use before lengthening the run.
+# 94-100% here, and the node is disk-bound as well: both controllers run near
+# maximum shares, read p99 is 100-350 ms, and the controllers still differ on it
+# (v2 traded write latency for read latency in the 2026-11-09 round), so the load
+# stays unthrottled.
+#
+# Disk: the key range bounds the logical data, not the bytes on disk. Every
+# overwrite is a new 1 KB version in a fresh run, and ICS discards the old version
+# only when the runs holding both merge, which below the top tier almost never
+# happens (a run covers a random 100K of the keys). So the live size settles at
+# 6-8x the logical set plus the top-tier merge in flight: with 50M keys (50 GB) the
+# i4i.large runs of 2026-11-09 reached 324 GB live at 28K writes/s, and i8g.large at
+# 42K writes/s was at 320 GB live and 417 GB on the filesystem after 2.5 h, still
+# rising, on a 468 GB NVMe. 25M keys halve the plateau (~150-225 GB live, peaks
+# ~250 GB), and the plateau does not grow with the run length.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
 test_duration: 780
@@ -31,7 +39,7 @@ test_metadata:
   description: >-
     Compaction controller comparison, write-heavy workload (95% writes / 5% reads) with
     controller v1 selected via scylla.yaml. BYO ScyllaDB build on a single small
-    node, RF 1, ICS table, 50M-row population then 12 hours of unthrottled
+    node, RF 1, ICS table, 25M-row population then 12 hours of unthrottled
     cassandra-stress mixed load with a uniform key distribution that keeps the DB CPUs saturated,
     so compaction only gets the CPU its shares allow. No nemesis.
   test_type: longevity
@@ -68,7 +76,7 @@ append_scylla_args: >-
   --logger-log-level compaction_rates=debug
 
 # One tablet replica per shard. i8g.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
-# 2 tablet replicas of ~25 GB each, one per shard.
+# 2 tablet replicas of ~12.5 GB each, one per shard.
 # min/max_tablet_count pin the count, so the table growing past the 5 GB default
 # tablet size never triggers a split, which would double the compaction groups
 # the controller sees. cassandra-stress uses CREATE ... IF NOT EXISTS, so this
@@ -78,11 +86,11 @@ pre_create_keyspace:
   - "CREATE TABLE IF NOT EXISTS keyspace1.standard1 (key blob PRIMARY KEY, \"C0\" blob, \"C1\" blob, \"C2\" blob, \"C3\" blob) WITH compaction = {'class': 'IncrementalCompactionStrategy'} AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};"
 
 prepare_write_cmd: >-
-  cassandra-stress write no-warmup cl=ONE n=50000000
+  cassandra-stress write no-warmup cl=ONE n=25000000
   -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
   -rate threads=50
-  -pop seq=1..50000000
+  -pop seq=1..25000000
   -col 'n=FIXED(4) size=FIXED(256)'
   -log interval=5
 
@@ -91,7 +99,7 @@ stress_cmd: >-
   -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
   -rate threads=200
-  -pop 'dist=UNIFORM(1..50000000)'
+  -pop 'dist=UNIFORM(1..25000000)'
   -col 'n=FIXED(4) size=FIXED(256)'
   -log interval=5
 
