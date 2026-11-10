@@ -90,9 +90,17 @@ append_scylla_args: >-
 # tablet size never triggers a split, which would double the compaction groups
 # the controller sees. cassandra-stress uses CREATE ... IF NOT EXISTS, so this
 # pre-created schema wins over the one in its -schema option.
+# min_threshold 2, in the trickle jobs only: at ~1 MB/s of writes no tier ever reached
+# the default threshold of 4 in the 12 h runs of 2026-11-10; ICS compacted pairs on
+# spare capacity (compaction_enforce_min_threshold is off by default) and both
+# controllers, which count only the tiers at min_threshold, saw nothing to do, so v1
+# had nothing to burst on outside the post-prepare drain. With the schema at 2 every
+# pair is a tier at threshold: the strategy and the controllers agree, and v1's bursts
+# on the top-tier merges show up within the run. The moderate and write-heavy jobs
+# keep the default: their tiers reach 4 runs on their own.
 pre_create_keyspace:
   - "CREATE KEYSPACE IF NOT EXISTS keyspace1 WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 2};"
-  - "CREATE TABLE IF NOT EXISTS keyspace1.standard1 (key blob PRIMARY KEY, \"C0\" blob, \"C1\" blob, \"C2\" blob, \"C3\" blob) WITH compaction = {'class': 'IncrementalCompactionStrategy'} AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};"
+  - "CREATE TABLE IF NOT EXISTS keyspace1.standard1 (key blob PRIMARY KEY, \"C0\" blob, \"C1\" blob, \"C2\" blob, \"C3\" blob) WITH compaction = {'class': 'IncrementalCompactionStrategy', 'min_threshold': '2'} AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};"
 
 prepare_write_cmd: >-
   cassandra-stress write no-warmup cl=ONE n=150000000
