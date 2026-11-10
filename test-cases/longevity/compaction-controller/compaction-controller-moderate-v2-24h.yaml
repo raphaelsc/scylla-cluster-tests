@@ -67,6 +67,13 @@ nemesis_class_name: 'NoOpMonkey'
 append_scylla_yaml:
   rf_rack_valid_keyspaces: true
   compaction_controller: v2
+  # ICS compacts any tier of 2 runs when none holds min_threshold (4) runs unless this is
+  # set, and both controllers count only the tiers at min_threshold. In the 12 h runs of
+  # 2026-11-10 one shard stayed in that regime for the whole run: 1 TB compacted at a
+  # controller target of 0, 23 to 68 MB/s of a disk the other shard had saturated, while
+  # that other shard starved. Enforced here so both shards compact the same way and the
+  # controllers see all the work the strategy does; the schema stays at the default 4.
+  compaction_enforce_min_threshold: true
 
 # Scylla command line: the SCT defaults (setting append_scylla_args replaces them)
 # plus debug logging of the compaction rate/controller logger, so the per-minute
