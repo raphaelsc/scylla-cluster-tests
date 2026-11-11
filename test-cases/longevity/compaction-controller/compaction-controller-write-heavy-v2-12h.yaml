@@ -61,6 +61,10 @@ instance_type_loader: 'c6i.xlarge'
 user_prefix: 'cc-write-heavy-v2'
 
 nemesis_class_name: 'NoOpMonkey'
+# Scylla Manager is not used (no nemesis, no repair or backup). Off so setup does not
+# depend on fetching its apt key from keyserver.ubuntu.com, which failed every build
+# on 2026-11-11, and so no agent runs beside the reactor being measured.
+use_mgmt: false
 
 # Setting append_scylla_yaml replaces the default dict, so keep rf_rack_valid_keyspaces.
 append_scylla_yaml:
