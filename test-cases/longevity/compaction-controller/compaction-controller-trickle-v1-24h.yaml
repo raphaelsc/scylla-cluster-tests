@@ -20,12 +20,15 @@
 #            and 2026-11-09).
 #   stress:  24 h of two concurrent cassandra-stress commands:
 #            - write: new keys only (a sequence above the populated range), throttled
-#              to 1000/s, ~1 MB/s, which is what the 5%/95% mixed command delivered.
+#              to 2000/s, ~2 MB/s (1 MB/s per shard). At 1000/s a tier at the top of
+#              the tree came due once per 17 to 33 h of trickle, so a 24 h run held
+#              at most one top-tier merge; 2000/s halves every refill period and is
+#              the most a 24 h run of new keys can write on this disk.
 #              No overwrites: in the 12 h runs the overwritten keys spread over the
 #              sstables and the read rate drifted from 25K/s to 17K/s under both
 #              controllers, hiding the controller's effect on the reads.
 #            - read: unthrottled, 400 threads, uniform over the populated range so
-#              reads miss cache. About 4% writes / 96% reads by count.
+#              reads miss cache. About 6% writes / 94% reads by count.
 #
 # The query load must leave no spare capacity. Seastar's schedulers are work
 # conserving: idle CPU or disk goes to compaction whatever shares the controller
@@ -35,16 +38,17 @@
 # raise the read threads before trusting the results. 200 threads left the reactors
 # at 90% in the 12 h runs, hence 400.
 # Disk over 24 h: the write stream adds new keys, so the live set grows from ~150 GB
-# to ~236 GB (86M rows of 1 KB at 1000/s); the key range is 150M wide so the sequence
-# never wraps into overwrites. With ICS space amplification that is roughly 260 to
-# 300 GB of the 468 GB NVMe; watch scylla_filesystem usage in the first 12 h anyway.
+# to ~323 GB (173M rows of 1 KB at 2000/s); the key range is 250M wide so the sequence
+# never wraps into overwrites. With ICS space amplification and a top-tier merge's
+# temporary space the peak is roughly 360 to 390 GB of the 468 GB NVMe, 77 to 83%;
+# Scylla stops writes at 98%. Watch scylla_filesystem usage from hour 12 on.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
 test_duration: 1560
 test_metadata:
   description: >-
     Compaction controller comparison, trickle-write workload (~1000 new-key writes/s
-    against unthrottled reads, ~4% / 96%) with controller v1 selected via scylla.yaml.
+    against unthrottled reads, ~6% / 94%) with controller v1 selected via scylla.yaml.
     BYO ScyllaDB build on a single small node, RF 1, ICS table, 150M-row population
     then 24 hours of a throttled new-key write stream plus a saturating uniform read
     stream, so compaction only gets the capacity its shares allow. No nemesis.
@@ -120,8 +124,8 @@ stress_cmd:
     cassandra-stress write no-warmup cl=ONE duration=1440m
     -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
     -mode cql3 native
-    -rate threads=10 throttle=1000/s
-    -pop seq=150000001..300000000
+    -rate threads=20 throttle=2000/s
+    -pop seq=150000001..400000000
     -col 'n=FIXED(4) size=FIXED(256)'
     -log interval=5
   - >-
