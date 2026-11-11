@@ -9,7 +9,9 @@
 # Phases (the prepare runs to completion before the stress phase starts, which is
 # how SCT sequences them):
 #   load:  800M rows of one 128-byte column, unique sequential keys, written once,
-#          NOT throttled, 100 threads from a c6i.xlarge loader. About 160 GB on disk.
+#          NOT throttled, 200 threads from a c6i.xlarge loader. About 160 GB on disk.
+#          (At 100 threads the writes were client-bound, 85k/s at 1.2 ms, and sl:default
+#          waited for CPU only 6-7% of the time, so the shares did not reach the writes.)
 #          Small rows so that 3-4 h of unthrottled ingest fits the 468 GB NVMe with
 #          room for compaction's temporary space; at 1 KB rows 4 h is 650 GB.
 #   reads: 1 h of cassandra-stress read, 400 threads, uniform over the 800M keys.
@@ -106,7 +108,7 @@ prepare_write_cmd: >-
   cassandra-stress write no-warmup cl=ONE n=800000000
   -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
   -mode cql3 native
-  -rate threads=100
+  -rate threads=200
   -pop seq=1..800000000
   -col 'n=FIXED(1) size=FIXED(128)'
   -log interval=5
