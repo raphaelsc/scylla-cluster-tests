@@ -73,6 +73,13 @@ append_scylla_yaml:
   # that other shard starved. Enforced here so both shards compact the same way and the
   # controllers see all the work the strategy does; the schema stays at the default 4.
   compaction_enforce_min_threshold: true
+  # v1 reaches its maximum shares at a normalized backlog of this factor (backlog over
+  # the shard's memory; default 30). This node is 468 GB over 16 GiB, 29:1, where the
+  # tree never stages a backlog of 30x the memory; a 69:1 disk-to-memory node, the ratio
+  # the controllers are designed for, sees 69/29 = 2.4x the normalized backlog for the
+  # same share of its disk. 30 x 29 / 69 = 13 makes v1 react here as it does there,
+  # the same factor in every v1 job of the comparison.
+  compaction_normalization_factor: 13
 
 # Scylla command line: the SCT defaults (setting append_scylla_args replaces them)
 # plus debug logging of the compaction rate/controller logger, so the per-minute
