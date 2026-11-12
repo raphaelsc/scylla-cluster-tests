@@ -1,0 +1,135 @@
+# Compaction controller comparison: bulk ingestion, then reads, controller v1.
+#
+# The 12-hour variant of the bulk job: about 10 h of bulk load with no reads,
+# followed by 2 h of reads. Scylla comes from a BYO build of
+# raphaelsc/scylla branch v2-work-over-deadline (or the AMI baked from it); the
+# controller is selected through scylla.yaml.
+#
+# Cluster: 1 DB node (i8ge.large), RF 1, 1 loader, 1 monitor, no nemesis.
+# i8ge.large, not the i8g.large of the other controller jobs: the same Graviton4
+# 2 vCPUs and 16 GiB, so the same arm64 AMI and the same CPU-bound ingest rate, but a
+# 1250 GB NVMe instead of 468 GB. 10 h of unthrottled ingest does not fit 468 GB.
+# Phases (the prepare runs to completion before the stress phase starts, which is
+# how SCT sequences them):
+#   load:  3000M rows of one 128-byte column, unique sequential keys, written once,
+#          NOT throttled, 200 threads from a c6i.xlarge loader. The 5 h job's load
+#          (bulk round 4, 2026-11-11) ran at 88-90k rows/s with both reactors at 100%
+#          and took 166 bytes of live data per row, peaking at 1.45x the live data on
+#          the filesystem: 3000M rows is ~9.5 h at that rate (more if the deeper tree
+#          slows the writes), ~500 GB live and ~725 GB peak, 58% of the 1250 GB NVMe.
+#          Scylla stops writes at 98%.
+#          (At 100 threads the writes were client-bound, 85k/s at 1.2 ms, and sl:default
+#          waited for CPU only 6-7% of the time, so the shares did not reach the writes.)
+#          Small rows so that 10 h of unthrottled ingest fits the NVMe with room for
+#          compaction's temporary space; at 1 KB rows it is about 3 TB.
+#   reads: 2 h of cassandra-stress read, 400 threads, uniform over the 3000M keys.
+#
+# What it tests. With no reads, controller v2's read discount sits at its floor of
+# 1/min_threshold and its target at the ingestion rate: compaction keeps up with the
+# flushes but lets the tiers grow to min_threshold^2 runs instead of merging the
+# surplus by its deadline, so the writes keep the CPU. v1 reads the backlog and goes
+# to maximum shares against saturating writes. Compare the load's rows/s and write
+# p99 first. Then the reads: with unique keys a point read touches one sstable
+# whatever the tree holds (bloom filters skip the rest), so the discount stays at
+# the floor through the read hour and v2 keeps its deferred tree; what the reads
+# pay for is the sstable count itself, a bloom filter check per sstable. Compare
+# read p99 over the hour, the live sstable count, and how the drain proceeds in
+# the compaction_rates log (v2) and the shares (both). The write-heavy jobs cover
+# reads on an overwritten tree; this one covers the deferral and what it leaves.
+#
+# The load must leave no spare capacity, or compaction takes the idle CPU whatever
+# the shares and the controllers are indistinguishable: check in the first minutes
+# that scylla_reactor_utilization is ~100% on both shards. The writes run in the
+# default service level, 1000 shares.
+# Only ICS tables feed rates to controller v2, so the schema is ICS.
+
+# Load (~9.5-11 h) + 2 h of reads + setup and teardown.
+test_duration: 900
+# The load is the prepare phase; SCT's default prepare timeout is 300 min.
+prepare_stress_duration: 720
+test_metadata:
+  description: >-
+    Compaction controller comparison, bulk ingestion workload with controller v1
+    selected via scylla.yaml: 3000M rows of unique keys written unthrottled with no
+    reads (about 10 h), then two hours of reads. BYO ScyllaDB build on a single small node, RF 1,
+    ICS table. No nemesis.
+  test_type: longevity
+  tier: ondemand
+  duration_class: medium
+  supported_backends:
+    - aws
+  stress_tools:
+    - cassandra-stress
+  workload: write
+
+n_db_nodes: 1
+n_loaders: 1
+n_monitor_nodes: 1
+
+instance_type_db: 'i8ge.large'
+instance_type_loader: 'c6i.xlarge'
+
+user_prefix: 'cc-bulk-v1-12h'
+
+nemesis_class_name: 'NoOpMonkey'
+# Scylla Manager is not used (no nemesis, no repair or backup). Off so setup does not
+# depend on fetching its apt key from keyserver.ubuntu.com, which failed every build
+# on 2026-11-11, and so no agent runs beside the reactor being measured.
+use_mgmt: false
+
+# Setting append_scylla_yaml replaces the default dict, so keep rf_rack_valid_keyspaces.
+append_scylla_yaml:
+  rf_rack_valid_keyspaces: true
+  compaction_controller: v1
+  # As in the moderate and write-heavy jobs: ICS compacts any tier of 2 runs when none
+  # holds min_threshold (4) runs unless this is set, and both controllers count only the
+  # tiers at min_threshold. Enforced so both shards compact the same way and the
+  # controllers see all the work the strategy does; the schema stays at the default 4.
+  compaction_enforce_min_threshold: true
+  # v1 reaches its maximum shares at a normalized backlog of this factor (backlog over
+  # the shard's memory; default 30). 13 is the factor of every v1 job of the comparison,
+  # derived for the i8g.large (468 GB over 16 GiB, 29:1) to emulate a 69:1 node:
+  # 30 x 29 / 69 = 13. It is kept here so this job compares with the others, although
+  # this i8ge.large is itself 1250 GB over 16 GiB, 76:1, where the default 30 would
+  # already apply; with 13 v1 reaches its maximum shares at a smaller backlog than it
+  # would on a production node of this ratio.
+  compaction_normalization_factor: 13
+
+# Scylla command line: the SCT defaults (setting append_scylla_args replaces them)
+# plus debug logging of the compaction rate/controller logger, so the per-minute
+# controller decisions are in the DB logs next to the metrics.
+append_scylla_args: >-
+  --blocked-reactor-notify-ms 25 --abort-on-lsa-bad-alloc 1 --abort-on-seastar-bad-alloc
+  --abort-on-internal-error 1 --abort-on-ebadf 1 --enable-sstable-key-validation 1
+  --logger-log-level compaction_rates=debug
+
+# One tablet replica per shard. i8ge.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
+# 2 tablet replicas of ~250 GB each, one per shard.
+# min/max_tablet_count pin the count, so the table growing past the 5 GB default
+# tablet size never triggers a split, which would double the compaction groups
+# the controller sees. cassandra-stress uses CREATE ... IF NOT EXISTS, so this
+# pre-created schema wins over the one in its -schema option. One column, as the
+# load writes one.
+pre_create_keyspace:
+  - "CREATE KEYSPACE IF NOT EXISTS keyspace1 WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 2};"
+  - "CREATE TABLE IF NOT EXISTS keyspace1.standard1 (key blob PRIMARY KEY, \"C0\" blob) WITH compaction = {'class': 'IncrementalCompactionStrategy'} AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};"
+
+prepare_write_cmd: >-
+  cassandra-stress write no-warmup cl=ONE n=3000000000
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=200
+  -pop seq=1..3000000000
+  -col 'n=FIXED(1) size=FIXED(128)'
+  -log interval=5
+
+stress_cmd: >-
+  cassandra-stress read no-warmup cl=ONE duration=120m
+  -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=1) compaction(strategy=IncrementalCompactionStrategy)'
+  -mode cql3 native
+  -rate threads=400
+  -pop 'dist=UNIFORM(1..3000000000)'
+  -col 'n=FIXED(1) size=FIXED(128)'
+  -log interval=5
+
+round_robin: true
