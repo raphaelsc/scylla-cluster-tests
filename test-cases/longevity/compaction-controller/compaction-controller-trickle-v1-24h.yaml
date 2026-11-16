@@ -5,7 +5,14 @@
 # BYO build of raphaelsc/scylla branch v2-work-over-deadline (or the AMI
 # baked from it); the controller is selected through scylla.yaml.
 #
-# Cluster: 1 DB node (i8g.large), RF 1, 1 loader, 1 monitor, no nemesis.
+# Cluster: 1 DB node (i8ge.large), RF 1, 1 loader, 1 monitor, no nemesis.
+# i8ge.large, not the i8g.large of the 12 h trickle jobs: the same Graviton4 2 vCPUs and
+# 16 GiB, so the same arm64 AMI and 2 shards, but a 1250 GB NVMe instead of 468 GB (see
+# the disk note below). Its disk is slower: iotune measured 54k read IOPS and 250 MB/s of
+# writes against 75k and 413 MB/s on i8g.large. The reads of round 8's 12 h trickle used
+# 31k IOPS (median; 35k at most) and 236 MB/s, 58-65% of this disk's IOPS, so they stay
+# CPU-bound; compaction has less write bandwidth. Compare v1 and v2 within the run, not
+# with the trickle runs on i8g.large.
 # A single node is enough: the controller is per shard. This is the 24 h variant
 # of the 12 h job: the 2026-11-09 round showed the v2 busy shard still accumulating
 # runs in pending tiers at hour 12 (9 -> 20 runs, normalized backlog 2 -> 21) with
@@ -39,15 +46,18 @@
 # at 90% in the 12 h runs, hence 400.
 # Disk over 24 h: the write stream adds new keys, so the live set grows from ~150 GB
 # to ~323 GB (173M rows of 1 KB at 2000/s); the key range is 250M wide so the sequence
-# never wraps into overwrites. With ICS space amplification and a top-tier merge's
-# temporary space the peak is roughly 360 to 390 GB of the 468 GB NVMe, 77 to 83%;
-# Scylla stops writes at 98%. Watch scylla_filesystem usage from hour 12 on.
+# never wraps into overwrites. On the 468 GB i8g.large this didn't fit: the 24 h v2 run
+# of 2026-11-11 (round 5) failed at ~22 h when the filesystem reached 98% (458 GB), and
+# in the 12 h runs, at ~250 GB live, two top-tier merges running at once (one per shard)
+# took the filesystem from ~250 to 406-457 GB (round 7's v1 failed at 98%). Even both
+# shards rewriting all of their data at once is ~650-700 GB at the end of the run, about
+# 55% of this 1250 GB NVMe; Scylla stops writes at 98%.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
 test_duration: 1560
 test_metadata:
   description: >-
-    Compaction controller comparison, trickle-write workload (~1000 new-key writes/s
+    Compaction controller comparison, trickle-write workload (~2000 new-key writes/s
     against unthrottled reads, ~6% / 94%) with controller v1 selected via scylla.yaml.
     BYO ScyllaDB build on a single small node, RF 1, ICS table, 150M-row population
     then 24 hours of a throttled new-key write stream plus a saturating uniform read
@@ -65,7 +75,7 @@ n_db_nodes: 1
 n_loaders: 1
 n_monitor_nodes: 1
 
-instance_type_db: 'i8g.large'
+instance_type_db: 'i8ge.large'
 instance_type_loader: 'c6i.xlarge'
 
 user_prefix: 'cc-trickle-v1-24h'
@@ -96,7 +106,7 @@ append_scylla_args: >-
   --abort-on-internal-error 1 --abort-on-ebadf 1 --enable-sstable-key-validation 1
   --logger-log-level compaction_rates=debug
 
-# One tablet replica per shard. i8g.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
+# One tablet replica per shard. i8ge.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
 # 2 tablet replicas of ~75 GB each, one per shard.
 # min/max_tablet_count pin the count, so the table growing past the 5 GB default
 # tablet size never triggers a split, which would double the compaction groups

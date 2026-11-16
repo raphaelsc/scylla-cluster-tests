@@ -31,8 +31,11 @@
 # v1's normalization factor is 13, not the default 30, to emulate a 69:1 disk-to-memory
 # node on this 29:1 one (see append_scylla_yaml): at the default, moderate's top-tier
 # merges, normalized backlog 12-15, peaked at 450-550 shares in the 2026-11-11 round.
-# Disk over 24 h: the live set stays 50 GB (overwrites) and the 12 h runs peaked at
-# 177 GB of the 468 GB NVMe, so disk is not a concern here.
+# Disk over 24 h: the writes overwrite the 50M keys, so the live set is bounded, but it
+# holds old versions until compaction merges them: 165-187 GB of live data at the end
+# of the 12 h runs of rounds 6-8, and filesystem peaks of 244-289 GB. The 24 h runs of
+# 2026-11-11 (round 5) peaked at 304 and 310 GB of the 468 GB NVMe; Scylla stops writes
+# at 98%.
 # Only ICS tables feed rates to controller v2, so the schema is ICS.
 
 test_duration: 1500
