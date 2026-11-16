@@ -7,7 +7,7 @@
 # compaction catches up. The job measures how slow the reads start and how fast they
 # recover, under v1 and under v2.
 #
-# Cluster: 1 DB node (i8ge.large), RF 1, 1 loader, 1 monitor, no nemesis.
+# Cluster: 1 DB node (i8ge.large), RF 1, 1 loader (c6i.4xlarge), 1 monitor, no nemesis.
 # i8ge.large, not the i8g.large of the steady-state jobs: the same Graviton4 2 vCPUs and
 # 16 GiB, so the same arm64 AMI, but a 1250 GB NVMe. Eight write phases of up to ~70 GB
 # each are up to ~560 GB written; with no compaction at all that would not fit 468 GB.
@@ -53,7 +53,11 @@ n_loaders: 1
 n_monitor_nodes: 1
 
 instance_type_db: 'i8ge.large'
-instance_type_loader: 'c6i.xlarge'
+# c6i.4xlarge, not the c6i.xlarge of the other jobs: cassandra-stress user mode with batches costs
+# more client CPU per byte, and the first run (builds #2) was bound by a c6i.xlarge loader at
+# 91-99% CPU, with the DB reactor at 30-55% and ~35 MB/s of ingest for the node. Each phase is
+# one stress command, so one bigger loader, not more loaders, lifts the bound.
+instance_type_loader: 'c6i.4xlarge'
 
 user_prefix: 'cc-adversarial-v2-4h'
 
