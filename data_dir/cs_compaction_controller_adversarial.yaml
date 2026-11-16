@@ -1,0 +1,47 @@
+# cassandra-stress user profile of the compaction controller adversarial job
+# (test-cases/longevity/compaction-controller/compaction-controller-adversarial-v{1,2}-4h.yaml).
+#
+# Medium-size partitions with a row in every sstable: 50,000 partitions of 2,000 rows of
+# ~1 KB, 2 MB each and ~100 GB in all. A write batch puts 10 random rows of one random
+# partition, so a 15-minute write phase spreads each partition over every memtable, and
+# so over every sstable it flushes: a flush of a few hundred MB holds several rows of
+# nearly every partition. The clustering keys of each sstable then span the whole
+# partition, so its min/max clustering key can't exclude it, and a point read
+# (partition and row) touches every sstable holding the partition: all of them until
+# compaction merges them.
+
+keyspace: keyspace1
+
+keyspace_definition: |
+  CREATE KEYSPACE IF NOT EXISTS keyspace1 WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 2};
+
+table: adversarial
+
+table_definition: |
+  CREATE TABLE IF NOT EXISTS adversarial (
+      pk blob,
+      ck blob,
+      v blob,
+      PRIMARY KEY (pk, ck)
+  ) WITH compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};
+
+columnspec:
+  - name: pk
+    size: fixed(16)
+    population: uniform(1..50000)
+  - name: ck
+    size: fixed(16)
+    cluster: fixed(2000)
+  - name: v
+    size: fixed(1000)
+
+insert:
+  partitions: fixed(1)
+  select: fixed(10)/2000
+  batchtype: UNLOGGED
+
+queries:
+  point_read:
+    cql: SELECT * FROM adversarial WHERE pk = ? AND ck = ?
+    fields: samerow
