@@ -1,0 +1,154 @@
+# Compaction controller comparison: adversarial write/read cycles, controller v1.
+#
+# Avi's adversarial case for controller v2: 15 minutes of ingestion followed by 15 minutes
+# of reads. Nothing is learned in the 15 minutes of writes, so they leave the data
+# uncompacted; when the reads start, the urgency is high and the shares rise quickly, so
+# the reads start slow (medium-size partitions with a row in every sstable) and improve as
+# compaction catches up. The job measures how slow the reads start and how fast they
+# recover, under v1 and under v2.
+#
+# 8-hour variant: 16 cycles instead of 8, to see whether the backlog either controller leaves
+# from cycle to cycle keeps growing or levels off. The 4-hour runs (builds #3) ended with
+# 244-257 GB of live data from ~100 GB of distinct rows, still growing by ~15-60 GB a cycle.
+#
+# Cluster: 1 DB node (i8ge.large), RF 1, 1 loader (c6i.4xlarge), 1 monitor, no nemesis.
+# i8ge.large, not the i8g.large of the steady-state jobs: the same Graviton4 2 vCPUs and
+# 16 GiB, so the same arm64 AMI, but a 1250 GB NVMe. A write phase writes ~70 GB (the 4-hour
+# runs took 7,400-10,300 batches of 10 KB a second, bound by the disk's ~250 MB/s of writes);
+# sixteen are ~1.1 TB, which only compaction keeps on the disk. The 4-hour runs peaked at
+# 297-305 GB of disk used after 8 cycles.
+# Phases, run one after the other by compaction_controller_test.test_write_read_cycles:
+#   16 cycles of
+#   - write: 15 min of cassandra-stress user mode, NOT throttled, 200 threads, batches of
+#     10 random rows of one random partition (data_dir/cs_compaction_controller_adversarial.yaml):
+#     50,000 partitions of 2,000 rows of ~1 KB, 2 MB each, ~100 GB in all. Every phase
+#     overwrites rows of the same partitions, so the live data stays bounded at ~100 GB.
+#   - read: 15 min of point reads (partition and row), NOT throttled, 400 threads, uniform
+#     over the partitions. Each write phase spreads every partition over every sstable it
+#     flushes, so a point read touches every sstable holding the partition.
+# The first cycle is the case as Avi stated it: an empty table, no history. Later cycles
+# show whether the controllers carry anything from one cycle to the next, and whether a
+# backlog builds up across cycles.
+# Avi's estimate was 40 MB/s per shard of ingest; the node gives what it gives, unthrottled.
+#
+# What to compare: read throughput and p99 over each read phase (the first minutes, and
+# the time to recover), live sstables and sstables per read at the start and end of each
+# read phase, the shares in both phases, and the write rate. The compaction_rates log (v2)
+# has the urgency and the decisions minute by minute.
+# Only ICS tables feed rates to controller v2, so the schema is ICS.
+
+# 16 x 30 min of phases + setup and teardown.
+test_duration: 600
+test_metadata:
+  description: >-
+    Compaction controller comparison, adversarial workload with controller v1 selected via
+    scylla.yaml: 16 cycles of 15 minutes of unthrottled writes spreading medium-size partitions
+    over every sstable, then 15 minutes of unthrottled point reads. BYO ScyllaDB build on a
+    single small node, RF 1, ICS table. No nemesis.
+  test_type: longevity
+  tier: ondemand
+  duration_class: medium
+  supported_backends:
+    - aws
+  stress_tools:
+    - cassandra-stress
+  workload: mixed
+
+n_db_nodes: 1
+n_loaders: 1
+n_monitor_nodes: 1
+
+instance_type_db: 'i8ge.large'
+# c6i.4xlarge, not the c6i.xlarge of the other jobs: cassandra-stress user mode with batches costs
+# more client CPU per byte, and the first run (builds #2) was bound by a c6i.xlarge loader at
+# 91-99% CPU, with the DB reactor at 30-55% and ~35 MB/s of ingest for the node. Each phase is
+# one stress command, so one bigger loader, not more loaders, lifts the bound.
+instance_type_loader: 'c6i.4xlarge'
+
+user_prefix: 'cc-adversarial-v1-8h'
+
+nemesis_class_name: 'NoOpMonkey'
+# Scylla Manager is not used (no nemesis, no repair or backup), and no agent runs beside
+# the reactor being measured.
+use_mgmt: false
+
+# Setting append_scylla_yaml replaces the default dict, so keep rf_rack_valid_keyspaces.
+append_scylla_yaml:
+  rf_rack_valid_keyspaces: true
+  compaction_controller: v1
+  # As in the write-heavy and moderate jobs: enforced so both shards compact the same way
+  # and the controllers see all the work the strategy does; the schema stays at the default 4.
+  compaction_enforce_min_threshold: true
+  # v1 reaches its maximum shares at a normalized backlog of this factor (backlog over the
+  # shard's memory; default 30). 13 is the factor of every v1 job of the comparison,
+  # derived for the i8g.large (468 GB over 16 GiB, 29:1) to emulate a 69:1 node:
+  # 30 x 29 / 69 = 13. Kept here, as in the bulk jobs on this i8ge.large, so the jobs compare.
+  compaction_normalization_factor: 13
+
+# Scylla command line: the SCT defaults (setting append_scylla_args replaces them)
+# plus debug logging of the compaction rate/controller logger, so the per-minute
+# controller decisions are in the DB logs next to the metrics.
+append_scylla_args: >-
+  --blocked-reactor-notify-ms 25 --abort-on-lsa-bad-alloc 1 --abort-on-seastar-bad-alloc
+  --abort-on-internal-error 1 --abort-on-ebadf 1 --enable-sstable-key-validation 1
+  --logger-log-level compaction_rates=debug
+
+# One tablet replica per shard. i8ge.large has 2 vCPUs, so 2 shards; one node with RF 1 gives
+# 2 tablet replicas of ~50 GB each, one per shard. min/max_tablet_count pin the count, so the
+# table growing past the 5 GB default tablet size never triggers a split, which would double
+# the compaction groups the controller sees. The profile's CREATE ... IF NOT EXISTS then
+# leaves this schema as it is.
+pre_create_keyspace:
+  - "CREATE KEYSPACE IF NOT EXISTS keyspace1 WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 2};"
+  - "CREATE TABLE IF NOT EXISTS keyspace1.adversarial (pk blob, ck blob, v blob, PRIMARY KEY (pk, ck)) WITH compaction = {'class': 'IncrementalCompactionStrategy'} AND tablets = {'min_tablet_count': '2', 'max_tablet_count': '2'};"
+
+# One entry per cycle: stress_cmd[i] (writes) runs to completion, then stress_read_cmd[i].
+stress_cmd:
+  - &write_phase >-
+    cassandra-stress user profile=/tmp/cs_compaction_controller_adversarial.yaml 'ops(insert=1)'
+    no-warmup cl=ONE duration=15m
+    -mode cql3 native
+    -rate threads=200
+    -pop 'dist=UNIFORM(1..50000)'
+    -log interval=5
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+  - *write_phase
+
+stress_read_cmd:
+  - &read_phase >-
+    cassandra-stress user profile=/tmp/cs_compaction_controller_adversarial.yaml 'ops(point_read=1)'
+    no-warmup cl=ONE duration=15m
+    -mode cql3 native
+    -rate threads=400
+    -pop 'dist=UNIFORM(1..50000)'
+    -log interval=5
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+  - *read_phase
+
+round_robin: true
